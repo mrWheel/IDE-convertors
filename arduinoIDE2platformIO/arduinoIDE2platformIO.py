@@ -1,6 +1,6 @@
 #------------------------------------------------------------
 #
-#   convert a ArduinoIDE project to a PlatformIO project
+#   convert an ArduinoIDE project to a PlatformIO project
 #
 #   by Willem Aandewiel
 #
@@ -183,7 +183,7 @@ def extract_and_comment_defines(pio_folder, pio_include):
     Extract non-function-like #define statements from .h and .ino files,
     create allDefines.h, and comment original statements with info.
     """
-    all_defines = []
+    all_defines = set()  # Use a set to prevent duplicates
     define_pattern = r'^\s*#define\s+(\w+)(?:\s+(.+))?$'
 
     logging.info(f"Searching for #define statements in {pio_folder}")
@@ -206,7 +206,7 @@ def extract_and_comment_defines(pio_folder, pio_include):
 
                             # Check if it's not a function-like macro and not a header guard
                             if not macro_value.strip().startswith('(') and not macro_name.endswith('_H'):
-                                all_defines.append((macro_name, macro_value.strip()))
+                                all_defines.add((macro_name, macro_value.strip()))
                                 # Comment out the original #define with info
                                 new_content.append(f"//-- moved to allDefines.h // {line}")
                                 logging.debug(f"Added non-function-like #define: {macro_name}")
@@ -229,7 +229,7 @@ def extract_and_comment_defines(pio_folder, pio_include):
     try:
         with open(all_defines_path, 'w') as f:
             f.write("#ifndef ALLDEFINES_H\n#define ALLDEFINES_H\n\n")
-            for macro_name, macro_value in all_defines:
+            for macro_name, macro_value in sorted(all_defines):
                 if macro_value:
                     f.write(f"#define {macro_name} {macro_value}\n")
                 else:
@@ -556,7 +556,6 @@ def process_ino_files(pio_src, pio_include, project_name, global_vars):
         logging.info(f"Processing file: {source_path}, header_path {header_path}")
 
         # Create the header file if it doesn't exist
-        #--aaw- if not os.path.exists(header_path):
         create_header_file(header_path, base_name)
 
         with open(source_path, 'r') as f:
@@ -574,16 +573,19 @@ def process_ino_files(pio_src, pio_include, project_name, global_vars):
 
         update_header_with_prototypes(header_path, prototypes)
 
-        if file != main_ino:
-            with open(source_path, 'r+') as f:
-                content = f.read()
-                f.seek(0, 0)
-                f.write(f'#include "{base_name}.h"\n' + content)
+        # Add include statement for the corresponding header
+        include_statement = f'#include "{base_name}.h"'
+        if include_statement not in content:
+            content = f'{include_statement}\n\n{content}'
 
-            os.rename(source_path, os.path.join(pio_src, f"{base_name}.cpp"))
-        else:
-            # For the main project file, just rename it to .cpp
-            os.rename(source_path, os.path.join(pio_src, f"{project_name}.cpp"))
+        # Write the updated content back to the file
+        new_file_path = os.path.join(pio_src, f"{base_name}.cpp")
+        with open(new_file_path, 'w') as f:
+            f.write(content)
+
+        # Remove the original .ino file
+        #if file != main_ino:
+        os.remove(source_path)
 
     logging.info("Processed .ino files: renamed, updated headers, and converted to .cpp")
 
