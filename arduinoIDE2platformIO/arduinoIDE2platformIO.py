@@ -57,13 +57,49 @@ def get_project_info(project_dir):
     return project_folder, project_name, pio_folder, pio_src, pio_include
 
 #------------------------------------------------------------------------------------------------------
-def recreate_pio_folders(pio_src, pio_include):
-    """Remove and recreate PlatformIO src and include folders."""
+def recreate_pio_folders(pio_folder, pio_src, pio_include):
+    """Create or recreate PlatformIO folder structure."""
+    # Ensure the main PlatformIO folder exists
+    if not os.path.exists(pio_folder):
+        os.makedirs(pio_folder)
+        logging.info(f"Created PlatformIO folder: {pio_folder}")
+
+    # Recreate src and include folders
     for folder in [pio_src, pio_include]:
         if os.path.exists(folder):
             shutil.rmtree(folder)
         os.makedirs(folder)
-    logging.info("PlatformIO folders recreated")
+        logging.info(f"Recreated folder: {folder}")
+
+    logging.info("PlatformIO folder structure recreated")
+
+#------------------------------------------------------------------------------------------------------
+def copy_data_folder(project_folder, pio_folder):
+    """
+    Delete existing data folder in pio_folder if it exists,
+    then copy the data folder from the project folder to the PlatformIO folder if it exists.
+    """
+    source_data_folder = os.path.join(project_folder, 'data')
+    destination_data_folder = os.path.join(pio_folder, 'data')
+
+    # Delete existing data folder in pio_folder if it exists
+    if os.path.exists(destination_data_folder):
+        try:
+            shutil.rmtree(destination_data_folder)
+            logging.info(f"Deleted existing data folder in {pio_folder}")
+        except Exception as e:
+            logging.error(f"Error deleting existing data folder: {str(e)}")
+            return  # Exit the function if we can't delete the existing folder
+
+    # Copy data folder from project folder to pio_folder if it exists
+    if os.path.exists(source_data_folder):
+        try:
+            shutil.copytree(source_data_folder, destination_data_folder)
+            logging.info(f"Copied data folder from {source_data_folder} to {destination_data_folder}")
+        except Exception as e:
+            logging.error(f"Error copying data folder: {str(e)}")
+    else:
+        logging.info("No data folder found in the project folder")
 
 #------------------------------------------------------------------------------------------------------
 def create_platformio_ini(pio_folder):
@@ -236,11 +272,9 @@ def fix_main_header_file(header_path, project_name):
     with open(header_path, 'r') as f:
         content = f.read()
 
-    logging.info(f"1111\n{content}\n1111")
     # Remove existing header guards if present
     content = re.sub(r'#ifndef.*?_H\s*#define.*?_H', '', content, flags=re.DOTALL)
     content = re.sub(r'#endif.*?_H', '', content, flags=re.DOTALL)
-    logging.info(f"2222\n{content}\n2222")
 
     # Ensure includes are at the top
     includes = re.findall(r'#include.*', content, re.MULTILINE)
@@ -256,13 +290,10 @@ def fix_main_header_file(header_path, project_name):
     final_content += new_content
     final_content += f"\n#endif // {project_name.upper()}_H\n"
 
-    logging.info(f"3333\n{final_content}\n3333")
-
     with open(header_path, 'w') as f:
         f.write(final_content)
 
     logging.info(f"Fixed main header file: {header_path}")
-    logging.info(f"CORRECT\n{final_content}\nCORRECT")
 
 #------------------------------------------------------------------------------------------------------
 def process_header_file(header_path, base_name, is_main_header=False):
@@ -614,12 +645,14 @@ def main():
         logging.info(f"PlatformIO src folder: {pio_src}")
         logging.info(f"PlatformIO include folder: {pio_include}\n")
 
+        recreate_pio_folders(pio_folder, pio_src, pio_include)
+
         if not os.path.exists(pio_folder):
             logging.error(f"PlatformIO folder does not exist: {pio_folder}")
             return
 
-        recreate_pio_folders(pio_src, pio_include)
         copy_project_files(project_folder, pio_src, pio_include)
+        copy_data_folder(project_folder, pio_folder)
         create_platformio_ini(pio_folder)
         extract_and_comment_defines(pio_folder, pio_include)
         create_header_files(pio_src, pio_include, project_name)
@@ -644,4 +677,4 @@ def main():
 #======================================================================================================
 if __name__ == "__main__":
     main()
-  
+    
