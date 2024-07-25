@@ -1,10 +1,11 @@
 ############################################################################################################
 #
-#   convertor from platformIO to the ArduinoIDE
+#    convertor from platformIO to the ArduinoIDE
 #
-#   by Willem Aandewiel
+#    file name    : platformIO2arduinoIDE.py
+#    by           : Willem Aandewiel
 #
-#   Version 1.0 (23-07-2024)
+#    Version      : v1.0 (23-07-2024)
 #
 ############################################################################################################
 import os
@@ -122,8 +123,10 @@ def main():
     platformio_ini_path = os.path.join(platformio_base_folder, 'platformio.ini')
     arduino_ide_folder = os.path.join(platformio_base_folder, "ArduinoIDE")
 
-    #project_name = input("Enter the project name: ")
-    project_name = "ESP_ticker"
+    print(f"ArduinoIDE needs a main.ino file in a directory with the same name!")
+    print(f"In this python program that name is refered to as 'project name'.")
+    project_name = input("Enter the project name: ")
+    #project_name = "ESP_ticker"
     dest_folder = os.path.join(arduino_ide_folder, project_name)
 
     # Clear the ArduinoIDE folder
