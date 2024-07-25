@@ -1,10 +1,11 @@
 #------------------------------------------------------------
 #
-#   convert an ArduinoIDE project to a PlatformIO project
+#   convert a ArduinoIDE project to a PlatformIO project
 #
-#   by Willem Aandewiel
+#   ifilename : arduinoIDE2platformIO.py
+#   by        : Willem Aandewiel
 #
-#   Version 0.4 (24-07-2024)
+#   Version   : v0.4 (25-07-2024)
 #
 #------------------------------------------------------------
 import os
@@ -180,11 +181,12 @@ def remove_comments_preserve_strings(content):
 #------------------------------------------------------------------------------------------------------
 def extract_and_comment_defines(pio_folder, pio_include):
     """
-    Extract non-function-like #define statements from .h and .ino files,
+    Extract all #define statements (including functional and multi-line) from .h, .ino, and .cpp files,
     create allDefines.h, and comment original statements with info.
     """
-    all_defines = set()  # Use a set to prevent duplicates
-    define_pattern = r'^\s*#define\s+(\w+)(?:\s+(.+))?$'
+    all_defines = []
+    define_pattern = r'^\s*#define\s+(\w+)(?:\(.*?\))?\s*(.*?)(?:(?=\\\n)|$)'
+    continuation_pattern = r'\\\s*\n\s*(.*?)(?:(?=\\\n)|$)'
 
     logging.info(f"Searching for #define statements in {pio_folder}")
 
@@ -195,52 +197,64 @@ def extract_and_comment_defines(pio_folder, pio_include):
                 logging.debug(f"Processing file: {file_path}")
                 try:
                     with open(file_path, 'r') as f:
-                        content = f.readlines()
+                        content = f.read()
 
                     new_content = []
-                    for line in content:
+                    lines = content.split('\n')
+                    i = 0
+                    while i < len(lines):
+                        line = lines[i]
                         match = re.match(define_pattern, line)
                         if match:
                             macro_name = match.group(1)
-                            macro_value = match.group(2) if match.group(2) else ""
+                            macro_value = match.group(2)
+                            full_define = [line]
 
-                            # Check if it's not a function-like macro and not a header guard
-                            if not macro_value.strip().startswith('(') and not macro_name.endswith('_H'):
-                                all_defines.add((macro_name, macro_value.strip()))
+                            # Check for multi-line defines
+                            while macro_value.endswith('\\') and i + 1 < len(lines):
+                                i += 1
+                                next_line = lines[i]
+                                cont_match = re.match(continuation_pattern, next_line)
+                                if cont_match:
+                                    macro_value += '\n' + cont_match.group(1)
+                                    full_define.append(next_line)
+                                else:
+                                    break
+
+                            # Don't include header guards
+                            if not macro_name.endswith('_H'):
+                                all_defines.append((macro_name, '\n'.join(full_define)))
                                 # Comment out the original #define with info
-                                new_content.append(f"//-- moved to allDefines.h // {line}")
-                                logging.debug(f"Added non-function-like #define: {macro_name}")
+                                new_content.extend([f"//-- moved to allDefines.h // {line}" for line in full_define])
+                                logging.debug(f"Added #define: {macro_name}")
                             else:
-                                new_content.append(line)
+                                new_content.extend(full_define)
                         else:
                             new_content.append(line)
+                        i += 1
 
                     # Write the modified content back to the file
                     with open(file_path, 'w') as f:
-                        f.writelines(new_content)
+                        f.write('\n'.join(new_content))
                     logging.debug(f"Updated {file} with commented out #defines")
 
                 except Exception as e:
                     logging.error(f"Error processing file {file}: {str(e)}")
 
-    # Create allDefines.h with non-function-like macros
+    # Create allDefines.h with all macros
     all_defines_path = os.path.join(pio_include, 'allDefines.h')
     logging.info(f"Creating allDefines.h with {len(all_defines)} macros")
     try:
         with open(all_defines_path, 'w') as f:
             f.write("#ifndef ALLDEFINES_H\n#define ALLDEFINES_H\n\n")
-            for macro_name, macro_value in sorted(all_defines):
-                if macro_value:
-                    f.write(f"#define {macro_name} {macro_value}\n")
-                else:
-                    f.write(f"#define {macro_name}\n")
-            f.write("\n#endif // ALLDEFINES_H\n")
+            for macro_name, macro_value in all_defines:
+                f.write(f"{macro_value}\n\n")
+            f.write("#endif // ALLDEFINES_H\n")
         logging.info(f"Successfully created {all_defines_path}")
     except Exception as e:
         logging.error(f"Error creating allDefines.h: {str(e)}")
 
-    logging.info(f"Extracted {len(all_defines)} non-function-like #define statements")
-
+    logging.info(f"Extracted {len(all_defines)} #define statements")
 
 #------------------------------------------------------------------------------------------------------
 def create_header_file(header_path, base_name):
@@ -248,7 +262,9 @@ def create_header_file(header_path, base_name):
     with open(header_path, 'w') as f:
         f.write(f"#ifndef {base_name.upper()}_H\n")
         f.write(f"#define {base_name.upper()}_H\n\n")
-        f.write("#include <Arduino.h>\n")
+        f.write("#include <Arduino.h>\n\n")
+        f.write("//== Local Headers ==")
+        f.write("\n")
         f.write("#include \"allDefines.h\"\n\n")
         f.write("//== Extern Variables ==")
         f.write("\n\n")
@@ -296,42 +312,62 @@ def fix_main_header_file(header_path, project_name):
     logging.info(f"Fixed main header file: {header_path}")
 
 #------------------------------------------------------------------------------------------------------
-def process_header_file(header_path, base_name, is_main_header=False):
+def process_header_file(header_path, base_name):
     if os.path.exists(header_path):
         with open(header_path, 'r') as f:
             content = f.read()
+        # Check for existing header guards
+        has_guards = re.search(r'#ifndef\s+\w+_H.*?#define\s+\w+_H', content, re.DOTALL) is not None
+
+        if not has_guards:
+            # Add header guards if they don't exist
+            content = f"#ifndef {base_name.upper()}_H\n#define {base_name.upper()}_H\n\n{content}\n#endif // {base_name.upper()}_H\n"
     else:
+        # Create new file with header guards
         content = f"#ifndef {base_name.upper()}_H\n#define {base_name.upper()}_H\n\n#include <Arduino.h>\n#include \"allDefines.h\"\n\n#endif // {base_name.upper()}_H\n"
 
-    if is_main_header:
-        # For the main header, completely restructure the file
-        includes = re.findall(r'#include.*', content, re.MULTILINE)
-        externs = re.findall(r'extern.*?;', content, re.DOTALL)
-        prototypes = re.findall(r'^\w+[\s\*]+\w+\s*\([^)]*\);', content, re.MULTILINE)
+    # Extract sections
+    guard_start = re.search(r'#ifndef\s+\w+_H.*?#define\s+\w+_H', content, re.DOTALL)
+    guard_end = content.rfind('#endif')
 
-        new_content = f"#ifndef {base_name.upper()}_H\n#define {base_name.upper()}_H\n\n"
+    if guard_start and guard_end != -1:
+        header = content[:guard_start.end()]
+        body = content[guard_start.end():guard_end]
+        footer = content[guard_end:]
+    else:
+        return  # If we can't find guards, don't modify the file
+
+    # Process body
+    includes = re.findall(r'#include.*', body)
+    local_headers = re.findall(r'//== Local Headers ==.*?(?=//==|$)', body, re.DOTALL)
+    externs = re.findall(r'extern.*?;', body, re.DOTALL)
+    prototypes = re.findall(r'^\w+[\s\*]+\w+\s*\([^)]*\);', body, re.MULTILINE)
+
+    # Remove processed items from body
+    for item in includes + local_headers + externs + prototypes:
+        body = body.replace(item, '')
+
+    # Reconstruct file
+    new_content = header + '\n'
+
+    if includes:
         new_content += '\n'.join(includes) + '\n\n'
 
-        if externs:
-            new_content += "//== Extern Variables ==\n" + '\n'.join(externs) + '\n\n'
+    new_content += "//== Local Headers ==\n\n"
 
-        if prototypes:
-            new_content += "//== Function Prototypes ==\n" + '\n'.join(prototypes) + '\n\n'
+    if local_headers:
+        new_content += local_headers[0].strip() + '\n\n'
 
-        new_content += f"#endif // {base_name.upper()}_H\n"
+    if externs:
+        new_content += "//== Extern Variables ==\n" + '\n'.join(externs) + '\n\n'
 
-        with open(header_path, 'w') as f:
-            f.write(new_content)
-    else:
-        # For other header files, just ensure the guards are present
-        if "#ifndef" not in content:
-            new_content = f"#ifndef {base_name.upper()}_H\n#define {base_name.upper()}_H\n\n"
-            new_content += content
-            if "#endif" not in content:
-                new_content += f"\n#endif // {base_name.upper()}_H\n"
+    if prototypes:
+        new_content += "//== Function Prototypes ==\n" + '\n'.join(prototypes) + '\n\n'
 
-            with open(header_path, 'w') as f:
-                f.write(new_content)
+    new_content += body.strip() + '\n' + footer
+
+    with open(header_path, 'w') as f:
+        f.write(new_content)
 
     logging.info(f"Processed header file: {header_path}")
 
@@ -349,22 +385,26 @@ def copy_project_files(project_folder, pio_src, pio_include):
 #------------------------------------------------------------------------------------------------------
 def extract_global_vars(pio_src, pio_include, project_name):
     """
-    Extract global variable definitions from .ino files and the main project header file.
-    Only variables declared outside of all function blocks and not in function parameters are considered global.
+    Extract global variable and class instance definitions from .ino files and the main project header file.
+    Only declarations outside of all function blocks are considered global.
     """
     global_vars = {}
+    class_instances = {}
 
-    # Comprehensive list of object types, including String
-    types = r'(?:uint8_t|int8_t|uint16_t|int16_t|uint32_t|int32_t|uint64_t|int64_t|char|int|float|double|bool|long|short|unsigned|signed|size_t|void|String)'
+    # Pattern for variable declarations, including constructor calls
+    var_pattern = r'^\s*((?:volatile|static|unsigned|const)?\s*\w+(?:\s*\*)*)\s+([a-zA-Z]\w*(?:\[.*?\])?(?:\s*=\s*[^,;]+)?(?:\s*,\s*[a-zA-Z]\w*(?:\[.*?\])?(?:\s*=\s*[^,;]+)?)*)\s*;'
 
-    var_pattern = rf'^\s*((?:static|volatile|const)?\s*{types}(?:\s*\*)*)\s+((?:\w+(?:\[.*?\])?(?:\s*=\s*[^,;]+)?\s*,\s*)*\w+(?:\[.*?\])?(?:\s*=\s*[^,;]+)?)\s*;'
-    func_pattern = rf'^\s*(?:static|volatile|const)?\s*(?:{types})(?:\s*\*)*\s+(\w+)\s*\((.*?)\)'
+    # Pattern for class instance declarations
+    class_pattern = r'^\s*(\w+)\s+([a-zA-Z]\w*)\s*(?:=\s*[^,;]+|\([^)]*\))?\s*;'
+
+    # Function pattern
+    func_pattern = r'^\s*(?:static|volatile|const)?\s*\w+(?:\s*\*)*\s+(\w+)\s*\([^)]*\)\s*{'
 
     keywords = set(['if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
                     'break', 'continue', 'return', 'goto', 'typedef', 'struct', 'enum',
                     'union', 'sizeof', 'volatile', 'register', 'extern', 'inline'])
 
-    files_to_process = [f for f in os.listdir(pio_src) if f.endswith('.ino')]
+    files_to_process = [f for f in os.listdir(pio_src) if f.endswith('.ino') or f.endswith('.cpp')]
     main_ino = f"{project_name}.ino"
     if main_ino not in files_to_process and os.path.exists(os.path.join(pio_src, main_ino)):
         files_to_process.append(main_ino)
@@ -376,12 +416,12 @@ def extract_global_vars(pio_src, pio_include, project_name):
         files_to_process.append(main_header)
 
     for file in files_to_process:
-        if file.endswith('.ino'):
+        if file.endswith(('.ino', '.cpp')):
             file_path = os.path.join(pio_src, file)
         else:  # It's the main header file
             file_path = main_header_path
 
-        logging.info(f"Processing file for global variables: {file_path}")
+        logging.info(f"Processing file for global variables and class instances: {file_path}")
         try:
             with open(file_path, 'r') as f:
                 content = f.read()
@@ -390,17 +430,19 @@ def extract_global_vars(pio_src, pio_include, project_name):
             content = remove_comments_preserve_strings(content)
 
             lines = content.split('\n')
-
             brace_level = 0
             in_function = False
             file_vars = []
+            file_instances = []
 
-            for line in lines:
+            for line_num, line in enumerate(lines, 1):
                 stripped_line = line.strip()
 
                 # Check for function start
                 if re.search(func_pattern, stripped_line) and not in_function:
                     in_function = True
+                    brace_level += 1
+                    continue
 
                 # Count braces
                 brace_level += stripped_line.count('{') - stripped_line.count('}')
@@ -409,28 +451,39 @@ def extract_global_vars(pio_src, pio_include, project_name):
                 if brace_level == 0:
                     in_function = False
 
-                # Check for variable variables only at global scope
+                # Check for declarations only at global scope
                 if not in_function and brace_level == 0:
-                    match = re.search(var_pattern, stripped_line)
-                    if match:
-                        var_type = match.group(1).strip()
-                        var_declarations = match.group(2).split(',')
-                        for var_decl in var_declarations:
-                            var_name = var_decl.strip().split('=')[0].strip()  # Remove any initialization
+                    var_match = re.search(var_pattern, stripped_line)
+                    class_match = re.search(class_pattern, stripped_line)
+
+                    if var_match:
+                        var_type = var_match.group(1).strip()
+                        var_declarations = re.findall(r'([a-zA-Z]\w*(?:\[.*?\])?)(?:\s*=\s*[^,;]+)?', var_match.group(2))
+                        for var_name in var_declarations:
                             base_name = var_name.split('[')[0].strip()
                             if base_name not in keywords:
                                 file_vars.append((var_type, var_name))
-                                logging.debug(f"Found global variable in {file}: {var_type} {var_name}")
+                                logging.debug(f"Found global variable in {file}:{line_num}: {var_type} {var_name}")
+
+                    elif class_match:
+                        class_type = class_match.group(1).strip()
+                        instance_name = class_match.group(2).strip()
+                        file_instances.append((class_type, instance_name))
+                        logging.debug(f"Found class instance in {file}:{line_num}: {class_type} {instance_name}")
+
+                    else:
+                        logging.debug(f"Unmatched line in {file}:{line_num}: {stripped_line}")
 
             global_vars[file] = file_vars
-            logging.info(f"Processed {file} successfully. Found {len(file_vars)} global variables.")
+            class_instances[file] = file_instances
+            logging.info(f"Processed {file} successfully. Found {len(file_vars)} global variables and {len(file_instances)} class instances.")
 
         except Exception as e:
             logging.error(f"Error processing file {file}: {str(e)}")
             logging.error(traceback.format_exc())
 
-    logging.info("Extracted all global variables")
-    return global_vars
+    logging.info("Extracted all global variables and class instances")
+    return global_vars, class_instances
 
 #------------------------------------------------------------------------------------------------------
 def create_extern_declaration(var_type, var_name):
@@ -445,18 +498,18 @@ def create_extern_declaration(var_type, var_name):
     return f"extern {var_type} {var_name};"
 
 #------------------------------------------------------------------------------------------------------
-def update_header_with_externs(header_path, global_vars, used_vars, current_file):
-    """Update header file with extern variables for used global variables."""
+def update_header_with_externs(header_path, global_vars, class_instances, used_vars, current_file):
+    """Update header file with extern declarations for used global variables and class instances."""
     global global_extern_declarations
 
     logging.debug(f"Updating header {header_path} with externs")
     logging.debug(f"Global vars: {global_vars}")
+    logging.debug(f"Class instances: {class_instances}")
     logging.debug(f"Used vars: {used_vars}")
 
     with open(header_path, 'r+') as f:
         content = f.read()
         insert_pos = content.find("//== Extern Variables ==")
-        #logging.info(f"insert_pos [{insert_pos}]")
         if insert_pos == -1:
             logging.warning(f"Could not find Extern Variables marker in {header_path}")
             return
@@ -464,15 +517,26 @@ def update_header_with_externs(header_path, global_vars, used_vars, current_file
 
         new_extern_declarations = set()
 
+        # Process global variables
         all_globals = [var for file, vars in global_vars.items() if file != current_file for var in vars]
         logging.debug(f"All globals: {all_globals}")
-
         for var_type, var_name in all_globals:
             base_name = var_name.split('[')[0].split('=')[0].strip()
             logging.debug(f"Checking var: {base_name}")
             if base_name in used_vars:
                 extern_decl = create_extern_declaration(var_type, var_name)
                 logging.debug(f"Created extern declaration: {extern_decl}")
+                if extern_decl not in global_extern_declarations:
+                    new_extern_declarations.add(extern_decl)
+                    global_extern_declarations.add(extern_decl)
+
+        # Process class instances
+        all_instances = [instance for file, instances in class_instances.items() if file != current_file for instance in instances]
+        logging.debug(f"All class instances: {all_instances}")
+        for class_type, instance_name in all_instances:
+            if instance_name in used_vars:
+                extern_decl = f"extern {class_type} {instance_name};"
+                logging.debug(f"Created extern declaration for class instance: {extern_decl}")
                 if extern_decl not in global_extern_declarations:
                     new_extern_declarations.add(extern_decl)
                     global_extern_declarations.add(extern_decl)
@@ -484,9 +548,9 @@ def update_header_with_externs(header_path, global_vars, used_vars, current_file
             f.seek(0)
             f.write(new_content)
             f.truncate()
-            logging.info(f"Added {len(new_extern_declarations)} extern variables to {header_path}")
+            logging.info(f"Added {len(new_extern_declarations)} extern declarations to {header_path}")
         else:
-            logging.info(f"No new extern variables added to {header_path}")
+            logging.info(f"No new extern declarations added to {header_path}")
 
 #------------------------------------------------------------------------------------------------------
 def extract_prototypes(content):
@@ -535,7 +599,67 @@ def update_header_with_prototypes(header_path, prototypes):
     logging.info(f"Updated header {header_path} with {len(new_prototypes)} new Function Prototypes")
 
 #------------------------------------------------------------------------------------------------------
-def process_ino_files(pio_src, pio_include, project_name, global_vars):
+def process_function_references(pio_src, pio_include):
+    function_reference_array = {}
+
+    # Collect all function prototypes from header files
+    for file in os.listdir(pio_include):
+        if file.endswith('.h'):
+            with open(os.path.join(pio_include, file), 'r') as f:
+                content = f.read()
+            prototypes = re.findall(r'^\w+[\s\*]+(\w+)\s*\([^)]*\);', content, re.MULTILINE)
+            for func_name in prototypes:
+                function_reference_array[func_name] = file
+
+    # Print the function reference array
+    print("Function Reference Array:")
+    for func, file in function_reference_array.items():
+        print(f"{func}: {file}")
+
+    # Process .ino files
+    for file in os.listdir(pio_src):
+        if file.endswith('.ino') or file.endswith('.cpp'):
+            base_name = os.path.splitext(file)[0]
+            source_path = os.path.join(pio_src, file)
+            header_path = os.path.join(pio_include, f"{base_name}.h")
+
+            with open(source_path, 'r') as f:
+                content = f.read()
+
+            # Find all function calls
+            function_calls = set(re.findall(r'\b(\w+)\s*\(', content))
+
+            # Find local function definitions
+            local_functions = set(re.findall(r'\b\w+[\s\*]+(\w+)\s*\([^)]*\)\s*{', content))
+
+            # Determine which functions need to be included
+            functions_to_include = function_calls - local_functions
+
+            headers_to_include = set()
+            for func in functions_to_include:
+                if func in function_reference_array:
+                    headers_to_include.add(function_reference_array[func])
+
+            # Update the header file with necessary includes
+            if headers_to_include:
+                with open(header_path, 'r') as f:
+                    header_content = f.readlines()
+
+                local_headers_pos = next((i for i, line in enumerate(header_content) if "//== Local Headers ==" in line), -1)
+                if local_headers_pos != -1:
+                    insert_pos = local_headers_pos + 1
+                    new_includes = [f'#include "{header}"\n' for header in headers_to_include if header != f"{base_name}.h"]
+                    header_content[insert_pos:insert_pos] = new_includes
+
+                    with open(header_path, 'w') as f:
+                        f.writelines(header_content)
+
+                    logging.info(f"Updated {header_path} with new includes: {', '.join(new_includes)}")
+
+    logging.info("Processed function references and updated header files")
+
+#------------------------------------------------------------------------------------------------------
+def process_ino_files(pio_src, pio_include, project_name, global_vars, class_instances):
     global global_extern_declarations
     global_extern_declarations = set()  # Reset global extern declarations
 
@@ -566,7 +690,8 @@ def process_ino_files(pio_src, pio_include, project_name, global_vars):
         used_vars = set(re.findall(r'\b(\w+)\b', content_no_comments))
         logging.debug(f"Used vars in {file}: {used_vars}")
 
-        update_header_with_externs(header_path, global_vars, used_vars, file)
+        #aaw#update_header_with_externs(header_path, global_vars, used_vars, file)
+        update_header_with_externs(header_path, global_vars, class_instances, used_vars, file)
 
         prototypes = extract_prototypes(content_no_comments)
         logging.info(f"Found {len(prototypes)} prototypes in {file}")
@@ -593,22 +718,66 @@ def process_ino_files(pio_src, pio_include, project_name, global_vars):
 def update_project_header(pio_include, project_name):
     """Update project header file with includes for all created headers."""
     project_header_path = os.path.join(pio_include, f"{project_name}.h")
-    with open(project_header_path, 'r+') as f:
-        content = f.read()
-        f.seek(0, 0)
-        for file in os.listdir(pio_include):
-            if file.endswith('.h') and file != f"{project_name}.h":
-                include_statement = f'#include "{file}"\n'
-                if include_statement not in content:
-                    f.write(include_statement)
-        f.write(content)
-    logging.info(f"Updated project header {project_name}.h with includes")
+
+    with open(project_header_path, 'r') as f:
+        content = f.readlines()
+
+    new_content = []
+    local_includes = []
+    system_includes = []
+    after_includes = []
+    in_local_includes = False
+
+    for line in content:
+        if line.strip() == "//== Local Headers ==":
+            in_local_includes = True
+        elif line.startswith('#include <'):
+            system_includes.append(line)
+        elif line.startswith('#include "') and line.strip().endswith('.h"'):
+            if in_local_includes or not local_includes:
+                local_includes.append(line)
+            else:
+                system_includes.append(line)
+        else:
+            if local_includes:
+                after_includes.append(line)
+            else:
+                new_content.append(line)
+
+    # Reconstruct the content
+    new_content.extend(system_includes)
+    #new_content.append("\n//== Local Headers ==\n")
+    new_content.extend(local_includes)
+    new_content.extend(after_includes)
+
+    # Add any missing local includes
+    existing_includes = set(line.strip() for line in local_includes)
+    for file in os.listdir(pio_include):
+        if file.endswith('.h') and file != f"{project_name}.h":
+            include_line = f'#include "{file}"\n'
+            if include_line.strip() not in existing_includes:
+                new_content.insert(len(system_includes) + 1, include_line)
+
+    with open(project_header_path, 'w') as f:
+        f.writelines(new_content)
+
+    logging.info(f"Updated project header {project_name}.h with Local Headers marker and includes")
 
 #------------------------------------------------------------------------------------------------------
 def print_global_vars(global_vars):
     """Print the dictionary of global variables."""
     print("Global Variables:")
     for file, vars in global_vars.items():
+        print(f"In file {file}:")
+        for var_type, var_name in vars:
+            print(f"  {var_type} {var_name}")
+
+
+#------------------------------------------------------------------------------------------------------
+def print_class_instances(class_instances):
+    """Print the dictionary of class instances."""
+    print("Class instances:")
+    for file, vars in class_instances.items():
         print(f"In file {file}:")
         for var_type, var_name in vars:
             print(f"  {var_type} {var_name}")
@@ -658,10 +827,15 @@ def main():
         create_platformio_ini(pio_folder)
         extract_and_comment_defines(pio_folder, pio_include)
         create_header_files(pio_src, pio_include, project_name)
-        global_vars = extract_global_vars(pio_src, pio_include, project_name)
+        global_vars, class_instances = extract_global_vars(pio_src, pio_include, project_name)
         logging.debug(f"Extracted global vars: {global_vars}")
         print_global_vars(global_vars)
-        process_ino_files(pio_src, pio_include, project_name, global_vars)
+        logging.debug(f"Extracted class instances: {class_instances}")
+        print_class_instances(class_instances)  # You might want to create this function
+        process_ino_files(pio_src, pio_include, project_name, global_vars, class_instances)
+
+        process_function_references(pio_src, pio_include)
+        ##update_project_header(pio_include, project_name)
 
         # Process the main project header file last
         update_project_header(pio_include, project_name)
