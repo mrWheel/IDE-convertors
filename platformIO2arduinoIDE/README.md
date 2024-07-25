@@ -36,7 +36,8 @@ python platformIO2arduinoIDE.py
 
 ## Note
 
-- The project name is currently hardcoded as "ESP_ticker". You can modify the script to prompt for a project name if desired.
+- ArduinoIDE needs a `project directory` with the same name as the `main.ino` file
+- The program will prompt you for this `project` name.
 - Ensure you have the necessary permissions to read from the PlatformIO project directory and write to the Arduino IDE directory.
 
 ## Version
