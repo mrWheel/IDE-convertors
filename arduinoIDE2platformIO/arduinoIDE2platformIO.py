@@ -1,11 +1,13 @@
+cat arduinoIDE2platformIO.py
 #------------------------------------------------------------
 #
 #   convert a ArduinoIDE project to a PlatformIO project
 #
-#   ifilename : arduinoIDE2platformIO.py
+#   file name : arduinoIDE2platformIO.py   
+#
 #   by        : Willem Aandewiel
 #
-#   Version   : v0.4 (25-07-2024)
+#   Version   : v0.5 (26-07-2024)
 #
 #------------------------------------------------------------
 import os
@@ -52,7 +54,7 @@ def get_project_info(project_dir):
     """
     project_folder = os.path.abspath(project_dir)
     project_name = os.path.basename(project_folder)
-    pio_folder = os.path.join(project_folder, "PlatformIO")
+    pio_folder = os.path.join(project_folder, "PlatformIO", project_name)
     pio_src = os.path.join(pio_folder, "src")
     pio_include = os.path.join(pio_folder, "include")
     return project_folder, project_name, pio_folder, pio_src, pio_include
@@ -186,7 +188,6 @@ def extract_and_comment_defines(pio_folder, pio_include):
     """
     all_defines = []
     define_pattern = r'^\s*#define\s+(\w+)(?:\(.*?\))?\s*(.*?)(?:(?=\\\n)|$)'
-    continuation_pattern = r'\\\s*\n\s*(.*?)(?:(?=\\\n)|$)'
 
     logging.info(f"Searching for #define statements in {pio_folder}")
 
@@ -214,12 +215,18 @@ def extract_and_comment_defines(pio_folder, pio_include):
                             while macro_value.endswith('\\') and i + 1 < len(lines):
                                 i += 1
                                 next_line = lines[i]
-                                cont_match = re.match(continuation_pattern, next_line)
-                                if cont_match:
-                                    macro_value += '\n' + cont_match.group(1)
-                                    full_define.append(next_line)
+                                full_define.append(next_line)
+                                macro_value += '\n' + next_line.strip()
+
+                            # Add the closing line if it's not already included
+                            if i + 1 < len(lines) and not macro_value.endswith('\\'):
+                                i += 1
+                                closing_line = lines[i]
+                                if closing_line.strip().startswith(')'):
+                                    full_define.append(closing_line)
+                                    macro_value += '\n' + closing_line.strip()
                                 else:
-                                    break
+                                    i -= 1  # If it's not a closing parenthesis, go back one line
 
                             # Don't include header guards
                             if not macro_name.endswith('_H'):
@@ -385,20 +392,16 @@ def copy_project_files(project_folder, pio_src, pio_include):
 #------------------------------------------------------------------------------------------------------
 def extract_global_vars(pio_src, pio_include, project_name):
     """
-    Extract global variable and class instance definitions from .ino files and the main project header file.
-    Only declarations outside of all function blocks are considered global.
+    Extract global variable definitions from .ino files and the main project header file.
+    Only variables declared outside of all function blocks are considered global.
     """
     global_vars = {}
-    class_instances = {}
 
-    # Pattern for variable declarations, including constructor calls
-    var_pattern = r'^\s*((?:volatile|static|unsigned|const)?\s*\w+(?:\s*\*)*)\s+([a-zA-Z]\w*(?:\[.*?\])?(?:\s*=\s*[^,;]+)?(?:\s*,\s*[a-zA-Z]\w*(?:\[.*?\])?(?:\s*=\s*[^,;]+)?)*)\s*;'
+    # Comprehensive list of object types, including String
+    types = r'(?:uint8_t|int8_t|uint16_t|int16_t|uint32_t|int32_t|uint64_t|int64_t|char|int|float|double|bool|long|short|unsigned|signed|size_t|void|String)'
 
-    # Pattern for class instance declarations
-    class_pattern = r'^\s*(\w+)\s+([a-zA-Z]\w*)\s*(?:=\s*[^,;]+|\([^)]*\))?\s*;'
-
-    # Function pattern
-    func_pattern = r'^\s*(?:static|volatile|const)?\s*\w+(?:\s*\*)*\s+(\w+)\s*\([^)]*\)\s*{'
+    var_pattern = rf'^\s*((?:static|volatile|const)?\s*{types}(?:\s*\*)*)\s+((?:\w+(?:\[.*?\])?(?:\s*=\s*[^,;]+)?\s*,\s*)*\w+(?:\[.*?\])?(?:\s*=\s*[^,;]+)?)\s*;'
+    func_pattern = rf'^\s*(?:static|volatile|const)?\s*(?:{types})(?:\s*\*)*\s+(\w+)\s*\((.*?)\)'
 
     keywords = set(['if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
                     'break', 'continue', 'return', 'goto', 'typedef', 'struct', 'enum',
@@ -421,7 +424,7 @@ def extract_global_vars(pio_src, pio_include, project_name):
         else:  # It's the main header file
             file_path = main_header_path
 
-        logging.info(f"Processing file for global variables and class instances: {file_path}")
+        logging.info(f"Processing file for global variables: {file_path}")
         try:
             with open(file_path, 'r') as f:
                 content = f.read()
@@ -433,7 +436,6 @@ def extract_global_vars(pio_src, pio_include, project_name):
             brace_level = 0
             in_function = False
             file_vars = []
-            file_instances = []
 
             for line_num, line in enumerate(lines, 1):
                 stripped_line = line.strip()
@@ -441,8 +443,6 @@ def extract_global_vars(pio_src, pio_include, project_name):
                 # Check for function start
                 if re.search(func_pattern, stripped_line) and not in_function:
                     in_function = True
-                    brace_level += 1
-                    continue
 
                 # Count braces
                 brace_level += stripped_line.count('{') - stripped_line.count('}')
@@ -451,39 +451,92 @@ def extract_global_vars(pio_src, pio_include, project_name):
                 if brace_level == 0:
                     in_function = False
 
-                # Check for declarations only at global scope
+                # Check for variable declarations only at global scope
                 if not in_function and brace_level == 0:
                     var_match = re.search(var_pattern, stripped_line)
-                    class_match = re.search(class_pattern, stripped_line)
-
                     if var_match:
                         var_type = var_match.group(1).strip()
                         var_declarations = re.findall(r'([a-zA-Z]\w*(?:\[.*?\])?)(?:\s*=\s*[^,;]+)?', var_match.group(2))
                         for var_name in var_declarations:
                             base_name = var_name.split('[')[0].strip()
                             if base_name not in keywords:
-                                file_vars.append((var_type, var_name))
+                                file_vars.append((var_type, var_name, file))  # Note: added file name here
                                 logging.debug(f"Found global variable in {file}:{line_num}: {var_type} {var_name}")
 
-                    elif class_match:
-                        class_type = class_match.group(1).strip()
-                        instance_name = class_match.group(2).strip()
-                        file_instances.append((class_type, instance_name))
-                        logging.debug(f"Found class instance in {file}:{line_num}: {class_type} {instance_name}")
-
-                    else:
-                        logging.debug(f"Unmatched line in {file}:{line_num}: {stripped_line}")
-
             global_vars[file] = file_vars
-            class_instances[file] = file_instances
-            logging.info(f"Processed {file} successfully. Found {len(file_vars)} global variables and {len(file_instances)} class instances.")
+            logging.info(f"Processed {file} successfully. Found {len(file_vars)} global variables.")
 
         except Exception as e:
             logging.error(f"Error processing file {file}: {str(e)}")
             logging.error(traceback.format_exc())
 
-    logging.info("Extracted all global variables and class instances")
-    return global_vars, class_instances
+    logging.info("Extracted all global variables")
+    return global_vars
+
+#------------------------------------------------------------------------------------------------------
+def extract_class_instances(pio_src, pio_include, project_name):
+    """
+    Extract class instance definitions from .ino files and header files.
+    Only global class instance declarations are considered.
+    """
+    class_instances = {}
+
+    # Updated pattern for class instance declarations
+    class_pattern = r'^\s*((?:\w+::)?\w+(?:<.*?>)?)\s+(\w+)\s*(?:\((.*?)\))?\s*;'
+
+    # List of known classes (extend this list as needed)
+    known_classes = [
+        'WiFiServer', 'ESP8266WebServer', 'ESP8266HTTPUpdateServer', 'WiFiClient',
+        'File', 'FSInfo', 'WiFiManager', 'Timezone'
+    ]
+
+    files_to_process = [f for f in os.listdir(pio_src) if f.endswith(('.ino', '.cpp'))]
+    files_to_process += [f for f in os.listdir(pio_include) if f.endswith('.h')]
+
+    for file in files_to_process:
+        if file.endswith(('.ino', '.cpp')):
+            file_path = os.path.join(pio_src, file)
+        else:  # It's a header file
+            file_path = os.path.join(pio_include, file)
+
+        logging.info(f"Processing file for class instances: {file_path}")
+        try:
+            with open(file_path, 'r') as f:
+                content = f.read()
+
+            # Remove comments while preserving string literals
+            content = remove_comments_preserve_strings(content)
+
+            lines = content.split('\n')
+            file_instances = []
+
+            for line_num, line in enumerate(lines, 1):
+                stripped_line = line.strip()
+
+                class_match = re.search(class_pattern, stripped_line)
+                if class_match:
+                    class_type = class_match.group(1).strip()
+                    instance_name = class_match.group(2).strip()
+                    constructor_args = class_match.group(3).strip() if class_match.group(3) else ""
+
+                    # Check if it's a known class or ends with a common class suffix
+                    if (class_type in known_classes or
+                        class_type.endswith(('Client', 'Server', 'Class', 'Manager', 'Handler'))):
+                        file_instances.append((class_type, instance_name, constructor_args, file))  # Note: added file name here
+                        logging.debug(f"Found class instance in {file}:{line_num}: {class_type} {instance_name}({constructor_args})")
+
+            if file_instances:
+                class_instances[file] = file_instances
+                logging.info(f"Processed {file} successfully. Found {len(file_instances)} class instances.")
+            else:
+                logging.info(f"Processed {file} successfully. No class instances found.")
+
+        except Exception as e:
+            logging.error(f"Error processing file {file}: {str(e)}")
+            logging.error(traceback.format_exc())
+
+    logging.info("Extracted all class instances")
+    return class_instances
 
 #------------------------------------------------------------------------------------------------------
 def create_extern_declaration(var_type, var_name):
@@ -498,7 +551,7 @@ def create_extern_declaration(var_type, var_name):
     return f"extern {var_type} {var_name};"
 
 #------------------------------------------------------------------------------------------------------
-def update_header_with_externs(header_path, global_vars, class_instances, used_vars, current_file):
+def update_header_with_externs(header_path, global_vars, class_instances, used_vars, current_file, project_name):
     """Update header file with extern declarations for used global variables and class instances."""
     global global_extern_declarations
 
@@ -518,12 +571,11 @@ def update_header_with_externs(header_path, global_vars, class_instances, used_v
         new_extern_declarations = set()
 
         # Process global variables
-        all_globals = [var for file, vars in global_vars.items() if file != current_file for var in vars]
+        all_globals = [var for file, vars in global_vars.items() for var in vars]
         logging.debug(f"All globals: {all_globals}")
-        for var_type, var_name in all_globals:
+        for var_type, var_name, defining_file in all_globals:
             base_name = var_name.split('[')[0].split('=')[0].strip()
-            logging.debug(f"Checking var: {base_name}")
-            if base_name in used_vars:
+            if base_name in used_vars and defining_file != current_file and defining_file != f"{project_name}.ino" and defining_file != f"{project_name}.h":
                 extern_decl = create_extern_declaration(var_type, var_name)
                 logging.debug(f"Created extern declaration: {extern_decl}")
                 if extern_decl not in global_extern_declarations:
@@ -531,10 +583,10 @@ def update_header_with_externs(header_path, global_vars, class_instances, used_v
                     global_extern_declarations.add(extern_decl)
 
         # Process class instances
-        all_instances = [instance for file, instances in class_instances.items() if file != current_file for instance in instances]
+        all_instances = [instance for file, instances in class_instances.items() for instance in instances]
         logging.debug(f"All class instances: {all_instances}")
-        for class_type, instance_name in all_instances:
-            if instance_name in used_vars:
+        for class_type, instance_name, _, defining_file in all_instances:
+            if instance_name in used_vars and defining_file != current_file and defining_file != f"{project_name}.ino" and defining_file != f"{project_name}.h":
                 extern_decl = f"extern {class_type} {instance_name};"
                 logging.debug(f"Created extern declaration for class instance: {extern_decl}")
                 if extern_decl not in global_extern_declarations:
@@ -691,7 +743,8 @@ def process_ino_files(pio_src, pio_include, project_name, global_vars, class_ins
         logging.debug(f"Used vars in {file}: {used_vars}")
 
         #aaw#update_header_with_externs(header_path, global_vars, used_vars, file)
-        update_header_with_externs(header_path, global_vars, class_instances, used_vars, file)
+        #aaw#update_header_with_externs(header_path, global_vars, class_instances, used_vars, file)
+        update_header_with_externs(header_path, global_vars, class_instances, used_vars, file, project_name)
 
         prototypes = extract_prototypes(content_no_comments)
         logging.info(f"Found {len(prototypes)} prototypes in {file}")
@@ -715,53 +768,48 @@ def process_ino_files(pio_src, pio_include, project_name, global_vars, class_ins
     logging.info("Processed .ino files: renamed, updated headers, and converted to .cpp")
 
 #------------------------------------------------------------------------------------------------------
-def update_project_header(pio_include, project_name):
-    """Update project header file with includes for all created headers."""
+def preserve_original_header(pio_include, project_name):
+    """Read and preserve the original content of the project header file."""
+    project_header_path = os.path.join(pio_include, f"{project_name}.h")
+    with open(project_header_path, 'r') as f:
+        return f.read()
+
+#------------------------------------------------------------------------------------------------------
+def update_project_header(pio_include, project_name, original_content):
+    """Update project header file with includes for all created headers while preserving original content."""
     project_header_path = os.path.join(pio_include, f"{project_name}.h")
 
-    with open(project_header_path, 'r') as f:
-        content = f.readlines()
+    # Split the original content into sections
+    sections = re.split(r'(//==.*?==)', original_content, flags=re.DOTALL)
 
     new_content = []
     local_includes = []
-    system_includes = []
-    after_includes = []
-    in_local_includes = False
 
-    for line in content:
-        if line.strip() == "//== Local Headers ==":
-            in_local_includes = True
-        elif line.startswith('#include <'):
-            system_includes.append(line)
-        elif line.startswith('#include "') and line.strip().endswith('.h"'):
-            if in_local_includes or not local_includes:
-                local_includes.append(line)
-            else:
-                system_includes.append(line)
+    # Process each section
+    for i, section in enumerate(sections):
+        if section.strip() == "//== Local Headers ==":
+            # Add new local includes here
+            new_content.append(section + "\n")
+            for file in os.listdir(pio_include):
+                if file.endswith('.h') and file != f"{project_name}.h":
+                    include_line = f'#include "{file}"\n'
+                    if include_line not in original_content:
+                        new_content.append(include_line)
+            new_content.append("\n")
+        elif i == 0:  # First section (before any //== markers)
+            new_content.append(section)
+            # Add system includes if they don't exist
+            if "#include <Arduino.h>" not in section:
+                new_content.append("#include <Arduino.h>\n")
         else:
-            if local_includes:
-                after_includes.append(line)
-            else:
-                new_content.append(line)
+            new_content.append(section)
 
-    # Reconstruct the content
-    new_content.extend(system_includes)
-    #new_content.append("\n//== Local Headers ==\n")
-    new_content.extend(local_includes)
-    new_content.extend(after_includes)
-
-    # Add any missing local includes
-    existing_includes = set(line.strip() for line in local_includes)
-    for file in os.listdir(pio_include):
-        if file.endswith('.h') and file != f"{project_name}.h":
-            include_line = f'#include "{file}"\n'
-            if include_line.strip() not in existing_includes:
-                new_content.insert(len(system_includes) + 1, include_line)
-
+    # Write the updated content back to the file
     with open(project_header_path, 'w') as f:
         f.writelines(new_content)
 
-    logging.info(f"Updated project header {project_name}.h with Local Headers marker and includes")
+    logging.info(f"Updated project header {project_name}.h while preserving original content")
+
 
 #------------------------------------------------------------------------------------------------------
 def print_global_vars(global_vars):
@@ -769,19 +817,17 @@ def print_global_vars(global_vars):
     print("Global Variables:")
     for file, vars in global_vars.items():
         print(f"In file {file}:")
-        for var_type, var_name in vars:
-            print(f"  {var_type} {var_name}")
-
+        for var_type, var_name, defining_file in vars:
+            print(f"  {var_type} {var_name} (defined in {defining_file})")
 
 #------------------------------------------------------------------------------------------------------
 def print_class_instances(class_instances):
     """Print the dictionary of class instances."""
     print("Class instances:")
-    for file, vars in class_instances.items():
+    for file, instances in class_instances.items():
         print(f"In file {file}:")
-        for var_type, var_name in vars:
-            print(f"  {var_type} {var_name}")
-
+        for class_type, instance_name, constructor_args, defining_file in instances:
+            print(f"  {class_type} {instance_name}({constructor_args}) (defined in {defining_file})")
 
 #------------------------------------------------------------------------------------------------------
 def parse_arguments():
@@ -827,18 +873,25 @@ def main():
         create_platformio_ini(pio_folder)
         extract_and_comment_defines(pio_folder, pio_include)
         create_header_files(pio_src, pio_include, project_name)
-        global_vars, class_instances = extract_global_vars(pio_src, pio_include, project_name)
+
+        original_header_content = preserve_original_header(pio_include, project_name)
+        logging.info(f"original {project_name}.h:\n{original_header_content}\n\n")
+
+        global_vars = extract_global_vars(pio_src, pio_include, project_name)
+        class_instances = extract_class_instances(pio_src, pio_include, project_name)
         logging.debug(f"Extracted global vars: {global_vars}")
         print_global_vars(global_vars)
         logging.debug(f"Extracted class instances: {class_instances}")
-        print_class_instances(class_instances)  # You might want to create this function
+        print_class_instances(class_instances)
+
         process_ino_files(pio_src, pio_include, project_name, global_vars, class_instances)
 
         process_function_references(pio_src, pio_include)
-        ##update_project_header(pio_include, project_name)
 
         # Process the main project header file last
-        update_project_header(pio_include, project_name)
+        ##original_header_content = preserve_original_header(pio_include, project_name)
+        logging.info(f"original {project_name}.h:\n{original_header_content}\n\n")
+        update_project_header(pio_include, project_name, original_header_content)
         main_header_path = os.path.join(pio_include, f"{project_name}.h")
         fix_main_header_file(main_header_path, project_name)
 
@@ -853,4 +906,3 @@ def main():
 #======================================================================================================
 if __name__ == "__main__":
     main()
-    
